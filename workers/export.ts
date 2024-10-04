@@ -2,18 +2,18 @@ import { query } from "@/shared/db";
 
 interface BookData {
   languageId: string;
+  languageCode: string;
   bookId: string;
-  wordIds: string[][];
-  glosses: string[];
+  phraseGlossPairs: { wordIds: string[]; gloss: string }[];
 }
 
 async function run() {
   log("starting export");
-  const completeBooksData = query<BookData[]>(
+  const completeBooksQueryResult = await query<BookData>(
     /*sql*/ `
         WITH 
         completed_books AS (
-            SELECT l.id AS "languageId", b.id AS "bookId",
+            SELECT l.id AS "languageId", l.code AS "languageCode", b.id AS "bookId",
             COUNT(*) FILTER (WHERE ph_phw.id IS NOT NULL 
                 AND ph_phw."deletedAt" IS NULL
                 AND g."state" IS NOT NULL
@@ -38,7 +38,7 @@ async function run() {
             )
         ),
         books_to_update AS (
-            SELECT completed_books."languageId", completed_books."bookId"
+            SELECT completed_books."languageId", completed_books."languageCode", completed_books."bookId"
             FROM completed_books 
             JOIN "Verse" AS v ON v."bookId" = completed_books."bookId"
             JOIN "Word" AS w ON w."verseId" = v.id
@@ -49,14 +49,14 @@ async function run() {
             GROUP BY completed_books."languageId", completed_books."bookId"
         ),
         completed_books_data AS (
-            SELECT books_to_update."languageId", books_to_update."bookId", array_agg(dat."wordIds") AS "wordIds", array_agg(dat."gloss") AS "glosses" 
+            SELECT books_to_update."languageId", books_to_update."languageCode", books_to_update."bookId", array_agg(jsonb_build_object("wordIds", dat."wordIds", "gloss", dat."gloss")) AS "phraseGlossPairs"
             FROM books_to_update 
             JOIN "Verse" AS v ON v."bookId" = books_to_update."bookId"
             JOIN "Word" AS w ON w."verseId" = v.id
             JOIN "PhraseWord" AS phw ON phw."wordId" = w.id
             JOIN "Phrase" AS ph ON ph.id = phw."phraseId"
             JOIN (
-                SELECT "Phrase".id AS "phraseId", to_jsonb(array_agg("Word".id)) AS "wordIds", (array_agg("Gloss"."gloss"))[1] AS "gloss" FROM "Phrase" 
+                SELECT "Phrase".id AS "phraseId", array_agg("Word".id) AS "wordIds", (array_agg("Gloss"."gloss"))[1] AS "gloss" FROM "Phrase" 
                 JOIN "PhraseWord" ON "PhraseWord"."phraseId" = "Phrase".id
                 JOIN "Word" ON "PhraseWord"."wordId" = "Word".id
                 JOIN "Gloss" ON "Gloss"."phraseId" = "Phrase".id
@@ -68,9 +68,39 @@ async function run() {
         SELECT * FROM completed_books_data`,
     []
   );
-  log("completed data gathered");
 
-  const fetchFileResponse = await fetch(
+  const completeBooksData = Object.groupBy(
+    completeBooksQueryResult.rows,
+    (row) => row.languageCode
+  );
+  log("completed data gathered");
+  /**
+   * lang
+      book
+        bookId
+        verse
+          verseId
+          chapterNumber
+          verseNumber
+          words
+            wordId
+            wordOrder
+            gloss
+            footnote
+            linkedWords
+
+      /
+      - lang/
+        - data.json
+          - []
+            - "book"
+              - "verse"
+                - []
+                  - "words"
+                    []
+   */
+
+  const languageFolders = await fetch(
     `https://api.github.com/repos/tycebrown/test-data-repo/contents/`,
     {
       method: "GET",
@@ -81,11 +111,30 @@ async function run() {
         "X-GitHub-Api-Version": "2022-11-28",
       },
     }
+  ).then((res) => res.json());
+
+  const languageDataShas = await Promise.all(
+    languageFolders.map(async (entry: any) => {
+      const languageDataFile = await fetch(
+        `https://api.github.com/repos/tycebrown/test-data-repo/contents/${entry.name}/data.json`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: "Bearer [the token]",
+            Accept: "application/vnd.github+json",
+            "Content-type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+          },
+        }
+      ).then((res) => res.json());
+      return [entry.name, languageDataFile.sha];
+    })
   );
-  log("fetched repo content");
+
+  log("fetched languages");
 
   const crudFileResponse = await fetch(
-    `https://api.github.com/repos/tycebrown/test-data-repo/contents/yes.csv`,
+    `https://api.github.com/repos/tycebrown/test-data-repo/`,
     {
       method: "PUT",
       headers: {
@@ -98,8 +147,8 @@ async function run() {
         message: `Update at ${new Date().toISOString()}`,
         content: "TWVzc2FnZQpIZWxsbyBXb3JsZAo=",
         sha: (
-          await fetchFileResponse.json()
-        ).entries.find((entry: any) => entry.name === "yes.csv").sha,
+          await languageFolders.json()
+        ).entries.find((entry: any) => entry.name === "en").sha,
       }),
     }
   );
@@ -113,4 +162,4 @@ function log(message: string) {
 
 run()
   .catch((error) => log(`${error}`))
-  .finally(async () => await close());
+  .finally(close);
