@@ -7,7 +7,6 @@ import { Icon } from "@/app/components/Icon";
 import { useTextWidth } from "@/app/utils/text-width";
 import { useTranslations } from "next-intl";
 import { MouseEvent, useLayoutEffect, useRef, useState } from "react";
-import { useFormState } from "react-dom";
 import { updateGloss } from "./actions";
 import { fontMap } from "@/app/fonts";
 import { isRichTextEmpty } from "@/app/components/RichTextInput";
@@ -47,7 +46,6 @@ export default function TranslateWord({ word, phrase, isHebrew, language, phrase
         (!isRichTextEmpty(phrase.translatorNote?.content ?? '') && canViewTranslatorNotes)
     const dir = 'ltr'
 
-
     const isMultiWord = (phrase?.wordIds.length ?? 0) > 1;
     const hasMachineSuggestion =
           !isMultiWord &&
@@ -59,24 +57,22 @@ export default function TranslateWord({ word, phrase, isHebrew, language, phrase
         (isMultiWord
             ? undefined
             : word.suggestions[0] || word.machineSuggestion);
-    const [currentInputValue, setCurrentInputValue] = useState(
-        glossValue ?? ''
-    );
 
     const { locale, code } = useParams<{ locale: string, code: string }>()
     const [saving, setSaving] = useState(false)
-    async function onChange(change: { state?: string; gloss?: string }) {
+    const autosaveQueued = useRef(false)
+    async function saveGloss(state: 'APPROVED' | 'UNAPPROVED') {
         setSaving(true)
+        autosaveQueued.current = false
+
         const formData = new FormData()
         formData.set('phraseId', phrase.id.toString())
-        if (typeof change.state === 'string') {
-            formData.set('state', change.state.toString())
-        }
-        if (typeof change.gloss === 'string') {
-            formData.set('gloss', change.gloss)
-        }
+        formData.set('gloss', input.current?.value ?? '')
+        formData.set('state', state)
+
         // TODO: handle errors in this result
         const _result = await updateGloss(formData)
+
         mutate({
             type: 'book-progress',
             bookId: parseInt(word.id.slice(0, 2)),
@@ -182,7 +178,6 @@ export default function TranslateWord({ word, phrase, isHebrew, language, phrase
                     onChange={() => onSelect?.()}
                     onFocus={() => {
                         onFocus?.();
-                        onShowDetail?.();
                     }}
                 />
             )}
@@ -211,7 +206,7 @@ export default function TranslateWord({ word, phrase, isHebrew, language, phrase
                     dir={language.textDirection}
                 >
                     <div className="group-focus-within/input-row:block hidden">
-                        {currentInputValue && status !== 'approved' && (
+                        {status !== 'approved' && (
                             <Button
                                 className="!bg-green-600 w-9"
                                 tabIndex={-1}
@@ -219,11 +214,7 @@ export default function TranslateWord({ word, phrase, isHebrew, language, phrase
                                 disabled={saving}
                                 onClick={(e: MouseEvent) => {
                                     e.stopPropagation();
-                                    if (status === 'saved') {
-                                        onChange({ state: 'APPROVED' });
-                                    } else {
-                                        onChange({ state: 'APPROVED', gloss: glossValue });
-                                    }
+                                    saveGloss('APPROVED')
                                     input.current?.focus();
                                 }}
                             >
@@ -238,7 +229,7 @@ export default function TranslateWord({ word, phrase, isHebrew, language, phrase
                                 disabled={saving}
                                 onClick={(e: MouseEvent) => {
                                     e.stopPropagation();
-                                    onChange({ state: 'UNAPPROVED' });
+                                    saveGloss('UNAPPROVED')
                                     input.current?.focus();
                                 }}
                             >
@@ -277,21 +268,27 @@ export default function TranslateWord({ word, phrase, isHebrew, language, phrase
                             state={status === 'approved' ? 'success' : undefined}
                             aria-describedby={`word-help-${word.id}`}
                             aria-labelledby={`word-${word.id}`}
-                            onChange={(value, implicit) => {
-                                if (
-                                    value !== phrase?.gloss?.text ||
-                                    (!implicit && status !== 'approved')
-                                ) {
-                                    onChange({
-                                        gloss: value,
-                                        state: !implicit && !!value ? 'APPROVED' : 'UNAPPROVED',
-                                    });
-                                }
+                            onChange={(value) => {
+                                console.log('blur')
+                                autosaveQueued.current = true
+                                setTimeout(() => {
+                                    console.log('autosave')
+                                    if (autosaveQueued.current && value !== phrase.gloss?.text) {
+                                        saveGloss('UNAPPROVED')
+                                    }
+                                }, 200)
                             }}
-                            onInput={(event) => {
-                                setCurrentInputValue(
-                                    (event.target as HTMLInputElement).value
-                                );
+                            onSelect={() => {
+                                console.log('select')
+                                saveGloss('APPROVED')
+
+                                const nextRoot = root.current?.nextElementSibling;
+                                const next =
+                                    nextRoot?.querySelector('input:not([type])') ??
+                                    nextRoot?.querySelector('button');
+                                if (next && next instanceof HTMLElement) {
+                                    next.focus();
+                                }
                             }}
                             onKeyDown={(e) => {
                                 if (e.metaKey || e.altKey) return;
@@ -306,6 +303,11 @@ export default function TranslateWord({ word, phrase, isHebrew, language, phrase
                                                 onSelect?.();
                                             }
                                         } else {
+                                            setTimeout(() => {
+                                                console.log('enter')
+                                                saveGloss('APPROVED')
+                                            })
+
                                             const nextRoot = root.current?.nextElementSibling;
                                             const next =
                                                 nextRoot?.querySelector('input:not([type])') ??
@@ -319,7 +321,8 @@ export default function TranslateWord({ word, phrase, isHebrew, language, phrase
                                     case 'Escape': {
                                         if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)
                                             return;
-                                        onChange({ state: 'UNAPPROVED' });
+
+                                        saveGloss('UNAPPROVED')
                                         break;
                                     }
                                 }
