@@ -31,7 +31,7 @@ async function run() {
                 WHERE ph."languageId" = l.id
             ) AS ph_phw ON ph_phw."wordId" = w.id
             LEFT JOIN "Gloss" AS g ON g."phraseId" = ph_phw.id
-            GROUP BY l.id, b.id
+            GROUP BY l.id, l.code, b.id
             HAVING every(ph_phw.id IS NOT NULL 
             AND ph_phw."deletedAt" IS NULL
             AND g."state" IS NOT NULL
@@ -47,7 +47,7 @@ async function run() {
             JOIN "Phrase" AS ph ON ph.id = phw."phraseId"
             JOIN "GlossEvent" AS ge ON ge."phraseId" = ph.id
             WHERE ge."syncState" = 'PENDING' AND ph."languageId" = completed_books."languageId"
-            GROUP BY completed_books."languageId", completed_books."bookId"
+            GROUP BY completed_books."languageId", completed_books."languageCode", completed_books."bookId"
         ),
         completed_books_data AS (
             SELECT books_to_update."languageId", books_to_update."languageCode", books_to_update."bookId", array_agg(jsonb_build_object("wordIds", dat."wordIds", "gloss", dat."gloss")) AS "phraseGlossPairs"
@@ -64,7 +64,7 @@ async function run() {
                 GROUP BY "Phrase".id
             ) AS dat ON dat."phraseId" = ph.id
             WHERE ph."languageId" = books_to_update."languageId"
-            GROUP BY books_to_update."languageId", books_to_update."bookId"
+            GROUP BY books_to_update."languageId", books_to_update."languageCode", books_to_update."bookId"
         )
         SELECT * FROM completed_books_data`,
     []
@@ -101,18 +101,24 @@ async function run() {
                     - []
    */
 
-  const languageFolders = await fetch(
+  const languageFoldersResponse = await fetch(
     `https://api.github.com/repos/tycebrown/test-data-repo/contents/`,
     {
       method: "GET",
       headers: {
-        Authorization: "Bearer [the token]",
+        Authorization: `Bearer  ${process.env.DATA_REPO_TOKEN}`,
         Accept: "application/vnd.github+json",
         "Content-type": "application/json",
         "X-GitHub-Api-Version": "2022-11-28",
       },
     }
-  ).then((res) => res.json());
+  );
+  if (!languageFoldersResponse.ok)
+    throw new Error(
+      `fetching from '${languageFoldersResponse.url}': status ${languageFoldersResponse.status}`
+    );
+  const languageFolders = await languageFoldersResponse.json();
+
   const languageDataShas = await Promise.all(
     languageFolders
       .filter((languageFolder: any) =>
@@ -131,7 +137,7 @@ async function run() {
             },
           }
         ).then((res) => res.json());
-        return { code: entry.name, sha: languageDataFile.sha };
+        return { code: entry.name, sha: languageDataFile?.sha };
       })
   );
 
