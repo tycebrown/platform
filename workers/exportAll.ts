@@ -9,7 +9,7 @@ interface BookData {
 }
 
 async function run() {
-  log("starting export");
+  log("starting export -?");
   const completeBooksQueryResult = await query<BookData>(
     /*sql*/ `
         WITH 
@@ -50,7 +50,7 @@ async function run() {
             GROUP BY completed_books."languageId", completed_books."languageCode", completed_books."bookId"
         ),
         completed_books_data AS (
-            SELECT books_to_update."languageId", books_to_update."languageCode", books_to_update."bookId", array_agg(jsonb_build_object("wordIds", dat."wordIds", "gloss", dat."gloss")) AS "phraseGlossPairs"
+            SELECT books_to_update."languageId", books_to_update."languageCode", books_to_update."bookId" , array_agg(jsonb_build_object('wordIds', dat."wordIds", 'gloss', dat."gloss")) AS "phraseGlossPairs"
             FROM books_to_update 
             JOIN "Verse" AS v ON v."bookId" = books_to_update."bookId"
             JOIN "Word" AS w ON w."verseId" = v.id
@@ -70,6 +70,10 @@ async function run() {
     []
   );
 
+  log("query successful; grouping data");
+  log(
+    ` (debug) result: ${JSON.stringify(completeBooksQueryResult.rows, null, 2)}`
+  );
   const completeBooksData = Object.groupBy(
     completeBooksQueryResult.rows,
     (row: any) => row.languageCode
@@ -146,22 +150,25 @@ async function run() {
   const crudFileResponses = await Promise.all(
     Object.entries(completeBooksData).map(
       ([dataLanguageCode, booksData]: any) =>
-        fetch(`https://api.github.com/repos/tycebrown/test-data-repo/`, {
-          method: "PUT",
-          headers: {
-            Authorization: `Bearer ${process.env.DATA_REPO_TOKEN}`,
-            Accept: "application/vnd.github+json",
-            "Content-type": "application/json",
-            "X-GitHub-Api-Version": "2022-11-28",
-          },
-          body: JSON.stringify({
-            message: `Update at ${new Date().toISOString()}`,
-            content: "TWVzc2FnZQpIZWxsbyBXb3JsZAo=",
-            sha: languageDataShas.find(
-              ({ code }: any) => dataLanguageCode === code
-            )?.sha,
-          }),
-        })
+        fetch(
+          `https://api.github.com/repos/tycebrown/test-data-repo/${dataLanguageCode}/data.json`,
+          {
+            method: "PUT",
+            headers: {
+              Authorization: `Bearer ${process.env.DATA_REPO_TOKEN}`,
+              Accept: "application/vnd.github+json",
+              "Content-type": "application/json",
+              "X-GitHub-Api-Version": "2022-11-28",
+            },
+            body: JSON.stringify({
+              message: `Update at ${new Date().toISOString()}`,
+              content: makeItMakeSense(booksData),
+              sha: languageDataShas.find(
+                ({ code }: any) => dataLanguageCode === code
+              )?.sha,
+            }),
+          }
+        )
     )
   );
 
@@ -174,8 +181,18 @@ async function run() {
     )
   );
   log(crudFileResponses.map((res) => res.status).toString());
-
   log("export completed successfully");
+}
+
+function makeItMakeSense(booksData: BookData[]) {
+  return Buffer.from(
+    JSON.stringify(
+      booksData.map((bookData) => ({
+        bookId: bookData.bookId,
+        phraseGlossPairs: bookData.phraseGlossPairs,
+      }))
+    )
+  ).toString("base64");
 }
 
 function log(message: string) {
