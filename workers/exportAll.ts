@@ -1,4 +1,5 @@
 import "./worker-env";
+import "./worker-local-env";
 import { query, close } from "@/shared/db";
 
 interface BookData {
@@ -149,9 +150,28 @@ async function run() {
 
   const crudFileResponses = await Promise.all(
     Object.entries(completeBooksData).map(
-      ([dataLanguageCode, booksData]: any) =>
-        fetch(
-          `https://api.github.com/repos/tycebrown/test-data-repo/${dataLanguageCode}/data.json`,
+      ([dataLanguageCode, booksData]: any) => {
+        console.log([
+          `https://api.github.com/repos/tycebrown/test-data-repo/contents/${dataLanguageCode}/data.json`,
+          {
+            method: "PUT",
+            headers: {
+              Authorization: `Bearer ${process.env.DATA_REPO_TOKEN}`,
+              Accept: "application/vnd.github+json",
+              "Content-type": "application/json",
+              "X-GitHub-Api-Version": "2022-11-28",
+            },
+            body: JSON.stringify({
+              message: `Update at ${new Date().toISOString()}`,
+              content: makeItMakeSense(booksData),
+              sha: languageDataShas.find(
+                ({ code }: any) => dataLanguageCode === code
+              )?.sha,
+            }),
+          },
+        ]);
+        return fetch(
+          `https://api.github.com/repos/tycebrown/test-data-repo/contents/${dataLanguageCode}/data.json`,
           {
             method: "PUT",
             headers: {
@@ -168,19 +188,21 @@ async function run() {
               )?.sha,
             }),
           }
-        )
+        );
+      }
     )
   );
 
   log(
-    JSON.stringify(
-      Object.keys(completeBooksData).map((langName, i) => ({
-        langName,
-        response: crudFileResponses[i].status,
-      }))
-    )
+    "crudFileResponses: " +
+      JSON.stringify(
+        Object.keys(completeBooksData).map((langName, i) => ({
+          langName,
+          status: crudFileResponses[i].status,
+          statusText: crudFileResponses[i].statusText,
+        }))
+      )
   );
-  log(crudFileResponses.map((res) => res.status).toString());
   log("export completed successfully");
 }
 
