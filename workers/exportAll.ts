@@ -2,109 +2,76 @@ import "./worker-env";
 import "./worker-local-env";
 import { query, close } from "@/shared/db";
 
-interface BookData {
+interface DataRow {
   languageId: string;
   languageCode: string;
-  bookId: string;
-  phraseGlossPairs: { wordIds: string[]; gloss: string }[];
+  bookId: number;
+  verseId: string;
+  phraseId: number;
+  wordId: string;
+  gloss: string;
+  footnote?: string;
 }
 
 async function run() {
   log("starting export -?");
-  const completeBooksQueryResult = await query<BookData>(
+  const dataQuery = await query<DataRow[]>(
     /*sql*/ `
-        WITH 
-        completed_books AS (
-            SELECT l.id AS "languageId", l.code AS "languageCode", b.id AS "bookId",
-            COUNT(*) FILTER (WHERE ph_phw.id IS NOT NULL 
-                AND ph_phw."deletedAt" IS NULL
-                AND g."state" IS NOT NULL
-                AND g."state" = 'APPROVED'
-            ) AS "approvedCount",
-            COUNT(*) AS "wordCount"
-            FROM "Language" AS l 
-            CROSS JOIN "Book" AS b
-            JOIN "Verse" AS v ON v."bookId" = b.id
-            JOIN "Word" AS w ON w."verseId" = v.id
-            LEFT JOIN LATERAL (
-                SELECT * FROM "Phrase" AS ph 
-                JOIN "PhraseWord" AS phw ON phw."phraseId" = ph.id
-                WHERE ph."languageId" = l.id
-            ) AS ph_phw ON ph_phw."wordId" = w.id
-            LEFT JOIN "Gloss" AS g ON g."phraseId" = ph_phw.id
-            GROUP BY l.id, l.code, b.id
-            HAVING every(ph_phw.id IS NOT NULL 
-            AND ph_phw."deletedAt" IS NULL
-            AND g."state" IS NOT NULL
-            AND g."state" = 'APPROVED'
-            )
-        ),
-        books_to_update AS (
-            SELECT completed_books."languageId", completed_books."languageCode", completed_books."bookId"
-            FROM completed_books 
-            JOIN "Verse" AS v ON v."bookId" = completed_books."bookId"
-            JOIN "Word" AS w ON w."verseId" = v.id
-            JOIN "PhraseWord" AS phw ON phw."wordId" = w.id
-            JOIN "Phrase" AS ph ON ph.id = phw."phraseId"
-            JOIN "GlossEvent" AS ge ON ge."phraseId" = ph.id
-            WHERE ge."syncState" = 'PENDING' AND ph."languageId" = completed_books."languageId"
-            GROUP BY completed_books."languageId", completed_books."languageCode", completed_books."bookId"
-        ),
-        completed_books_data AS (
-            SELECT books_to_update."languageId", books_to_update."languageCode", books_to_update."bookId" , array_agg(jsonb_build_object('wordIds', dat."wordIds", 'gloss', dat."gloss")) AS "phraseGlossPairs"
-            FROM books_to_update 
-            JOIN "Verse" AS v ON v."bookId" = books_to_update."bookId"
-            JOIN "Word" AS w ON w."verseId" = v.id
-            JOIN "PhraseWord" AS phw ON phw."wordId" = w.id
-            JOIN "Phrase" AS ph ON ph.id = phw."phraseId"
-            JOIN (
-                SELECT "Phrase".id AS "phraseId", array_agg("Word".id) AS "wordIds", (array_agg("Gloss"."gloss"))[1] AS "gloss" FROM "Phrase" 
-                JOIN "PhraseWord" ON "PhraseWord"."phraseId" = "Phrase".id
-                JOIN "Word" ON "PhraseWord"."wordId" = "Word".id
-                JOIN "Gloss" ON "Gloss"."phraseId" = "Phrase".id
-                GROUP BY "Phrase".id
-            ) AS dat ON dat."phraseId" = ph.id
-            WHERE ph."languageId" = books_to_update."languageId"
-            GROUP BY books_to_update."languageId", books_to_update."languageCode", books_to_update."bookId"
-        )
-        SELECT * FROM completed_books_data`,
+    WITH 
+      data_entries AS (
+        SELECT 
+          l.id AS "languageId",
+          l.name AS "languageCode",
+          b.id AS "bookId", 
+          v.id AS "verseId",
+          ph.id AS "phraseId",
+          w.id AS "wordId",
+          ph."deletedAt" AS "phraseDeletedAt", 
+          g.gloss AS "gloss", 
+          g.state AS "glossState",
+          ge."syncState" AS "glossSyncState",
+          fn.content AS "footnote"
+        FROM
+          "Book" AS b CROSS JOIN "Language" AS l
+          JOIN "Verse" AS v ON v."bookId" = b.id
+          JOIN "Word" AS w ON w."verseId" = v.id
+          LEFT JOIN "PhraseWord" AS phw ON phw."wordId" = w.id
+          LEFT JOIN "Phrase" AS ph ON ph.id = phw."phraseId"
+          LEFT JOIN "Gloss" AS g ON g."phraseId" = ph.id
+          LEFT JOIN "GlossEvent" AS ge ON ge."phraseId" = ph.id
+          LEFT JOIN "Footnote" AS fn ON fn."phraseId" = ph.id
+        WHERE ph.id IS NULL OR ph."languageId" = l.id
+      ),
+      complete_books AS (
+        SELECT "languageId", "bookId" FROM data_entries
+        GROUP BY "languageId", "bookId"
+        HAVING every(
+          "phraseId" IS NOT NULL 
+          AND "phraseDeletedAt" IS NULL
+          AND "glossState" IS NOT NULL
+          AND "glossState" = 'APPROVED'
+        ) AND bool_or("glossSyncState" = 'PENDING')
+      )
+    SELECT 
+      data_entries."languageId",
+      data_entries."languageCode"
+      data_entries."bookId", 
+      data_entries."verseId",
+      data_entries."phraseId",
+      data_entries."wordId",
+      data_entries."gloss", 
+      data_entries."footnote"
+    FROM complete_books JOIN data_entries USING ("languageId", "bookId")`,
     []
   );
 
   log("query successful; grouping data");
-  log(
-    ` (debug) result: ${JSON.stringify(completeBooksQueryResult.rows, null, 2)}`
-  );
+  log(` (debug) result: ${JSON.stringify(dataQuery.rows, null, 2)}`);
   const completeBooksData = Object.groupBy(
-    completeBooksQueryResult.rows,
+    dataQuery.rows,
     (row: any) => row.languageCode
   );
   log("completed data gathered");
-  /**
-   * lang
-      book
-        bookId
-        verse
-          verseId
-          chapterNumber
-          verseNumber
-          words
-            wordId
-            wordOrder
-            gloss
-            footnote
-            linkedWords
-
-      /
-      - lang/
-        - data.json
-          - []
-            - "book"
-              - "verse"
-                - []
-                  - "words"
-                    - []
-   */
 
   const languageFoldersResponse = await fetch(
     `https://api.github.com/repos/tycebrown/test-data-repo/contents/`,
@@ -150,27 +117,8 @@ async function run() {
 
   const crudFileResponses = await Promise.all(
     Object.entries(completeBooksData).map(
-      ([dataLanguageCode, booksData]: any) => {
-        console.log([
-          `https://api.github.com/repos/tycebrown/test-data-repo/contents/${dataLanguageCode}/data.json`,
-          {
-            method: "PUT",
-            headers: {
-              Authorization: `Bearer ${process.env.DATA_REPO_TOKEN}`,
-              Accept: "application/vnd.github+json",
-              "Content-type": "application/json",
-              "X-GitHub-Api-Version": "2022-11-28",
-            },
-            body: JSON.stringify({
-              message: `Update at ${new Date().toISOString()}`,
-              content: makeItMakeSense(booksData),
-              sha: languageDataShas.find(
-                ({ code }: any) => dataLanguageCode === code
-              )?.sha,
-            }),
-          },
-        ]);
-        return fetch(
+      ([dataLanguageCode, booksData]: any) =>
+        fetch(
           `https://api.github.com/repos/tycebrown/test-data-repo/contents/${dataLanguageCode}/data.json`,
           {
             method: "PUT",
@@ -188,8 +136,7 @@ async function run() {
               )?.sha,
             }),
           }
-        );
-      }
+        )
     )
   );
 
@@ -206,12 +153,35 @@ async function run() {
   log("export completed successfully");
 }
 
-function makeItMakeSense(booksData: BookData[]) {
+function makeItMakeSense(booksData: DataRow[]) {
+  /**
+   * lang
+      book
+        bookId
+        verse
+          verseId
+          chapterNumber
+          verseNumber
+          words
+            wordId
+            gloss
+            footnote
+            linkedWords
+
+      /
+      - lang/
+        - data.json
+          - []
+            - "book"
+              - "verse"
+                - []
+                  - "words"
+                    - []
+   */
   return Buffer.from(
     JSON.stringify(
       booksData.map((bookData) => ({
         bookId: bookData.bookId,
-        phraseGlossPairs: bookData.phraseGlossPairs,
       }))
     )
   ).toString("base64");
