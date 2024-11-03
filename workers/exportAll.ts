@@ -14,8 +14,8 @@ interface DataRow {
 }
 
 async function run() {
-  log("starting export -?");
-  const dataQuery = await query<DataRow[]>(
+  log("starting export");
+  const dataQuery = await query<DataRow>(
     /*sql*/ `
     WITH 
       data_entries AS (
@@ -54,7 +54,7 @@ async function run() {
       )
     SELECT 
       data_entries."languageId",
-      data_entries."languageCode"
+      data_entries."languageCode",
       data_entries."bookId", 
       data_entries."verseId",
       data_entries."phraseId",
@@ -66,11 +66,7 @@ async function run() {
   );
 
   log("query successful; grouping data");
-  log(` (debug) result: ${JSON.stringify(dataQuery.rows, null, 2)}`);
-  const completeBooksData = Object.groupBy(
-    dataQuery.rows,
-    (row: any) => row.languageCode
-  );
+  const rawData = Object.groupBy(dataQuery.rows, (row) => row.languageCode);
   log("completed data gathered");
 
   const languageFoldersResponse = await fetch(
@@ -94,7 +90,7 @@ async function run() {
   const languageDataShas = await Promise.all(
     languageFolders
       .filter((languageFolder: any) =>
-        Object.keys(completeBooksData).includes(languageFolder.name)
+        Object.keys(rawData).includes(languageFolder.name)
       )
       .map(async (entry: any) => {
         const languageDataFile = await fetch(
@@ -115,76 +111,76 @@ async function run() {
 
   log("fetched languages");
 
-  const crudFileResponses = await Promise.all(
-    Object.entries(completeBooksData).map(
-      ([dataLanguageCode, booksData]: any) =>
-        fetch(
-          `https://api.github.com/repos/tycebrown/test-data-repo/contents/${dataLanguageCode}/data.json`,
-          {
-            method: "PUT",
-            headers: {
-              Authorization: `Bearer ${process.env.DATA_REPO_TOKEN}`,
-              Accept: "application/vnd.github+json",
-              "Content-type": "application/json",
-              "X-GitHub-Api-Version": "2022-11-28",
-            },
-            body: JSON.stringify({
-              message: `Update at ${new Date().toISOString()}`,
-              content: makeItMakeSense(booksData),
-              sha: languageDataShas.find(
-                ({ code }: any) => dataLanguageCode === code
-              )?.sha,
-            }),
-          }
-        )
+  log("exporting data...");
+  await Promise.all(
+    Object.entries(rawData).map(([dataLanguageCode, rawLanguageData]: any) =>
+      fetch(
+        `https://api.github.com/repos/tycebrown/test-data-repo/contents/${dataLanguageCode}/data.json`,
+        {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${process.env.DATA_REPO_TOKEN}`,
+            Accept: "application/vnd.github+json",
+            "Content-type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+          },
+          body: JSON.stringify({
+            message: `Update at ${new Date().toISOString()}`,
+            content: generateDataFileContent(rawLanguageData),
+            sha: languageDataShas.find(
+              ({ code }: any) => dataLanguageCode === code
+            )?.sha,
+          }),
+        }
+      )
     )
   );
 
-  log(
-    "crudFileResponses: " +
-      JSON.stringify(
-        Object.keys(completeBooksData).map((langName, i) => ({
-          langName,
-          status: crudFileResponses[i].status,
-          statusText: crudFileResponses[i].statusText,
-        }))
-      )
-  );
   log("export completed successfully");
 }
 
-function makeItMakeSense(booksData: DataRow[]) {
+function generateDataFileContent(rawLanguageData: DataRow[]) {
   /**
-   * lang
+   * Overall structure of language data:
       book
         bookId
         verse
           verseId
-          chapterNumber
-          verseNumber
           words
             wordId
             gloss
             footnote
             linkedWords
-
-      /
-      - lang/
-        - data.json
-          - []
-            - "book"
-              - "verse"
-                - []
-                  - "words"
-                    - []
    */
-  return Buffer.from(
-    JSON.stringify(
-      booksData.map((bookData) => ({
-        bookId: bookData.bookId,
-      }))
-    )
-  ).toString("base64");
+
+  const structuredData = Object.entries(
+    Object.groupBy(rawLanguageData, (row) => row.bookId)
+  ).map(([bookId, rows]) => ({
+    bookId,
+    verses:
+      rows &&
+      Object.entries(Object.groupBy(rows, (row) => row.verseId)).map(
+        ([verseId, rows]) => ({
+          verseId,
+          words:
+            rows &&
+            Object.values(Object.groupBy(rows, (row) => row.phraseId)).flatMap(
+              (linkedRows) => {
+                const wordIds = linkedRows?.map((row) => row.wordId);
+                return linkedRows?.map((row) => ({
+                  wordId: row.wordId,
+                  gloss: row.gloss,
+                  footnote: row.footnote,
+                  linkedWords: wordIds?.filter(
+                    (wordId) => wordId !== row.wordId
+                  ),
+                }));
+              }
+            ),
+        })
+      ),
+  }));
+  return Buffer.from(JSON.stringify(structuredData)).toString("base64");
 }
 
 function log(message: string) {
