@@ -1,5 +1,4 @@
 import "./worker-env";
-import "./worker-local-env";
 import { query, close } from "@/shared/db";
 
 interface DataRow {
