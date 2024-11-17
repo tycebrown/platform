@@ -1,5 +1,5 @@
 import "./worker-env";
-import { query, close } from "@/shared/db";
+import { query, close, transaction } from "@/shared/db";
 
 interface DataRow {
   languageId: string;
@@ -14,8 +14,12 @@ interface DataRow {
 
 async function run() {
   log("starting export");
-  const dataQuery = await query<DataRow>(
-    /*sql*/ `
+
+  // Use a transaction to make sure that, if something fails,
+  // we can rollback our updates to the gloss event sync states
+  await transaction(async (q) => {
+    const dataQuery = await q<DataRow>(
+      /*sql*/ `
     WITH 
       data_entries AS (
         SELECT 
@@ -29,6 +33,7 @@ async function run() {
           g.gloss AS "gloss", 
           g.state AS "glossState",
           ge."syncState" AS "glossSyncState",
+          ge.id AS "glossEventId",
           fn.content AS "footnote"
         FROM
           "Book" AS b CROSS JOIN "Language" AS l
@@ -50,8 +55,13 @@ async function run() {
           AND "glossState" IS NOT NULL
           AND "glossState" = 'APPROVED'
         ) AND bool_or("glossSyncState" = 'PENDING')
+      ),
+      update_sync_states AS (
+        UPDATE "GlossEvent" SET "syncState" = 'SYNCED' 
+          FROM complete_books JOIN data_entries USING ("languageId", "bookId")
+          WHERE data_entries."glossEventId" = "GlossEvent".id
       )
-    SELECT 
+    SELECT DISTINCT
       data_entries."languageId",
       data_entries."languageCode",
       data_entries."bookId", 
@@ -61,79 +71,78 @@ async function run() {
       data_entries."gloss", 
       data_entries."footnote"
     FROM complete_books JOIN data_entries USING ("languageId", "bookId")`,
-    []
-  );
-
-  log("query successful; grouping data");
-  const rawData = Object.groupBy(dataQuery.rows, (row) => row.languageCode);
-  log("completed data gathered");
-
-  const languageFoldersResponse = await fetch(
-    `https://api.github.com/repos/tycebrown/test-data-repo/contents/`,
-    {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer  ${process.env.DATA_REPO_TOKEN}`,
-        Accept: "application/vnd.github+json",
-        "Content-type": "application/json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    }
-  );
-  if (!languageFoldersResponse.ok)
-    throw new Error(
-      `fetching from '${languageFoldersResponse.url}': status ${languageFoldersResponse.status}`
+      []
     );
-  const languageFolders = await languageFoldersResponse.json();
+    log("query successful; grouping data");
+    const rawData = Object.groupBy(dataQuery.rows, (row) => row.languageCode);
+    log("completed data gathered");
 
-  const languageDataShas = await Promise.all(
-    languageFolders
-      .filter((languageFolder: any) =>
-        Object.keys(rawData).includes(languageFolder.name)
-      )
-      .map(async (entry: any) => {
-        const languageDataFile = await fetch(
-          `https://api.github.com/repos/tycebrown/test-data-repo/contents/${entry.name}/data.json`,
+    const languageFoldersResponse = await fetch(
+      `https://api.github.com/repos/tycebrown/test-data-repo/contents/`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer  ${process.env.DATA_REPO_TOKEN}`,
+          Accept: "application/vnd.github+json",
+          "Content-type": "application/json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      }
+    );
+    if (!languageFoldersResponse.ok)
+      throw new Error(
+        `error fetching from '${languageFoldersResponse.url}': status ${languageFoldersResponse.status}`
+      );
+    const languageFolders = await languageFoldersResponse.json();
+
+    const languageDataShas = await Promise.all(
+      languageFolders
+        .filter((languageFolder: any) =>
+          Object.keys(rawData).includes(languageFolder.name)
+        )
+        .map(async (entry: any) => {
+          const languageDataFile = await fetch(
+            `https://api.github.com/repos/tycebrown/test-data-repo/contents/${entry.name}/data.json`,
+            {
+              method: "GET",
+              headers: {
+                Authorization: `Bearer ${process.env.DATA_REPO_TOKEN}`,
+                Accept: "application/vnd.github+json",
+                "Content-type": "application/json",
+                "X-GitHub-Api-Version": "2022-11-28",
+              },
+            }
+          ).then((res) => res.json());
+          return { code: entry.name, sha: languageDataFile?.sha };
+        })
+    );
+    log("fetched languages");
+
+    log("exporting data...");
+    await Promise.all(
+      Object.entries(rawData).map(([dataLanguageCode, rawLanguageData]: any) =>
+        fetch(
+          `https://api.github.com/repos/tycebrown/test-data-repo/contents/${dataLanguageCode}/data.json`,
           {
-            method: "GET",
+            method: "PUT",
             headers: {
               Authorization: `Bearer ${process.env.DATA_REPO_TOKEN}`,
               Accept: "application/vnd.github+json",
               "Content-type": "application/json",
               "X-GitHub-Api-Version": "2022-11-28",
             },
+            body: JSON.stringify({
+              message: `Update at ${new Date().toISOString()}`,
+              content: generateDataFileContent(rawLanguageData),
+              sha: languageDataShas.find(
+                ({ code }: any) => dataLanguageCode === code
+              )?.sha,
+            }),
           }
-        ).then((res) => res.json());
-        return { code: entry.name, sha: languageDataFile?.sha };
-      })
-  );
-
-  log("fetched languages");
-
-  log("exporting data...");
-  await Promise.all(
-    Object.entries(rawData).map(([dataLanguageCode, rawLanguageData]: any) =>
-      fetch(
-        `https://api.github.com/repos/tycebrown/test-data-repo/contents/${dataLanguageCode}/data.json`,
-        {
-          method: "PUT",
-          headers: {
-            Authorization: `Bearer ${process.env.DATA_REPO_TOKEN}`,
-            Accept: "application/vnd.github+json",
-            "Content-type": "application/json",
-            "X-GitHub-Api-Version": "2022-11-28",
-          },
-          body: JSON.stringify({
-            message: `Update at ${new Date().toISOString()}`,
-            content: generateDataFileContent(rawLanguageData),
-            sha: languageDataShas.find(
-              ({ code }: any) => dataLanguageCode === code
-            )?.sha,
-          }),
-        }
+        )
       )
-    )
-  );
+    );
+  });
 
   log("export completed successfully");
 }
@@ -165,12 +174,13 @@ function generateDataFileContent(rawLanguageData: DataRow[]) {
             rows &&
             Object.values(Object.groupBy(rows, (row) => row.phraseId)).flatMap(
               (linkedRows) => {
-                const wordIds = linkedRows?.map((row) => row.wordId);
-                return linkedRows?.map((row) => ({
+                if (!linkedRows) return;
+                const wordIds = linkedRows.map((row) => row.wordId);
+                return linkedRows.map((row) => ({
                   wordId: row.wordId,
                   gloss: row.gloss,
                   footnote: row.footnote,
-                  linkedWords: wordIds?.filter(
+                  linkedWords: wordIds.filter(
                     (wordId) => wordId !== row.wordId
                   ),
                 }));
