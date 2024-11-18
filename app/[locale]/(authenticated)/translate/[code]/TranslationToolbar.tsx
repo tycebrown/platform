@@ -13,10 +13,11 @@ import { bookFirstVerseId, bookLastVerseId, decrementVerseId, incrementVerseId }
 import { useTranslationClientState } from "./TranslationClientState";
 import TranslationProgressBar from "./TranslationProgressBar";
 import { useSWRConfig } from "swr";
+import { useFlash } from "@/app/flash";
 
 export interface TranslationToolbarProps {
     languages: { name: string; code: string }[];
-    currentLanguage: { roles: string [] };
+    currentLanguage?: { roles: string [] };
 }
 
 export default function TranslationToolbar({
@@ -27,9 +28,10 @@ export default function TranslationToolbar({
     const { verseId, code, locale } = useParams<{ locale: string, code: string, verseId: string }>()
     const router = useRouter()
     const { mutate } = useSWRConfig()
+    const flash = useFlash()
 
-    const isTranslator = currentLanguage.roles.includes('TRANSLATOR');
-    const isAdmin = currentLanguage.roles.includes('ADMIN');
+    const isTranslator = !!currentLanguage?.roles.includes('TRANSLATOR');
+    const isAdmin = !!currentLanguage?.roles.includes('ADMIN');
 
     const { selectedWords, focusedPhrase, clearSelectedWords } = useTranslationClientState()
     const canLinkWords = selectedWords.length > 1;
@@ -45,11 +47,14 @@ export default function TranslationToolbar({
         setReference(t('verse_reference', { bookId, chapter, verse }))
     }, [verseId, t])
 
-    const navigateToNextUnapprovedVerse = useCallback(() => {
+    const navigateToNextUnapprovedVerse = useCallback(async () => {
         const form = new FormData()
         form.set('verseId', verseId)
         form.set('code', code)
-        redirectToUnapproved(form)
+        const error = await redirectToUnapproved(form)
+        if (error) {
+            flash.success(error)
+        }
     }, [verseId, code])
 
     const approveAllGlosses = useCallback(async () => {

@@ -22,6 +22,7 @@ interface VerseWord {
 }
 
 interface Verse {
+    id: string
     number: number
     words: VerseWord[]
 }
@@ -68,7 +69,7 @@ export default function ReadingView({ chapterId, language, verses }: ReadingView
 
     const sidebarRef = useRef<ReadingSidebarRef>(null)
 
-    const { textSize } = useReadingClientState()
+    const { textSize, audioVerse } = useReadingClientState()
 
     return <>
         <div className="flex flex-col flex-grow lg:justify-center w-full min-h-0 lg:flex-row">
@@ -86,6 +87,7 @@ export default function ReadingView({ chapterId, language, verses }: ReadingView
                         <Fragment key={word.id}>
                             <span
                                 className={`
+                                    cursor-pointer
                                     ${i === verse.words.length - 1 ? 'me-1' : ''}
                                     ${(linkedWords.length > 0 &&
                                         popover.selectedWord?.word.id === word.id) ||
@@ -94,15 +96,13 @@ export default function ReadingView({ chapterId, language, verses }: ReadingView
                                         : ''
                                     }
                                 `}
-                                onClick={(e) => {
-                                    // popover.onWordClick(e, word)
-                                    setSidebarWord(word)
+                                onDoubleClick={(e) => {
                                     setShowSidebar(true)
                                 }}
-                                onMouseEnter={(e) =>
-                                    popover.onWordMouseEnter(e, word)
-                                }
-                                onMouseLeave={(e) => popover.onWordMouseLeave(e)}
+                                onClick={(e) => {
+                                    setSidebarWord(word)
+                                    popover.onWordClick(e, word)
+                                }}
                             >
                                 {word.text}
                             </span>
@@ -110,11 +110,24 @@ export default function ReadingView({ chapterId, language, verses }: ReadingView
                         </Fragment>
                     ));
                     words.unshift(
-                        <span key={`verse-${verse.number}`} className={'font-sans text-xs'}>
+                        <span
+                            key={`verse-${verse.number}`}
+                            className={'font-sans text-xs cursor-pointer'}
+                            // Allows audio player to start playing at this verse when clicked
+                            data-verse-number={verse.number}
+                        >
                             {verse.number}&nbsp;
                         </span>
                     );
-                    return words;
+                    return <span
+                        key={verse.id}
+                        className={`
+                            rounded
+                            ${audioVerse === verse.id ? 'bg-green-200 dark:bg-gray-600' : ''}
+                        `}
+                    >
+                        {words}
+                    </span>;
                 })}
             </div>
             {showSidebar && (

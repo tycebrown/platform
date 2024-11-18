@@ -13,6 +13,7 @@ const nextConfig = {
                 entry() {
                     return config.entry().then((entry) => {
                         return Object.assign({}, entry, { 'import.worker': path.resolve(process.cwd(), 'workers/import.ts'), 'exportAll.worker': path.resolve(process.cwd(), 'workers/exportAll.ts')  })
+
                     })
                 }
             });
